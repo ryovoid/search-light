@@ -221,6 +221,8 @@ export default class SearchLightExt extends Extension {
   }
 
   disable() {
+    this._clearDeferred();
+
     this._hiTimer?.shutdown();
     this._loTimer?.shutdown();
     this._hiTimer = null;
@@ -909,7 +911,42 @@ export default class SearchLightExt extends Extension {
     this._style.build('custom-search-light', styles);
   }
 
+  // Clutter 18 (GNOME 50) forbids changing the actor tree while an input or
+  // gesture signal is still being dispatched. show()/hide() reparent the
+  // search entry, so queue them to run once dispatch has unwound. See #166.
+  _defer(fn) {
+    if (!this._deferredIds) {
+      this._deferredIds = new Set();
+    }
+    let id = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+      this._deferredIds?.delete(id);
+      // the extension may have been disabled while this was queued
+      if (this.mainContainer) {
+        try {
+          fn();
+        } catch (err) {
+          console.log(err);
+        }
+      }
+      return GLib.SOURCE_REMOVE;
+    });
+    this._deferredIds.add(id);
+  }
+
+  _clearDeferred() {
+    if (!this._deferredIds) return;
+    for (let id of this._deferredIds) {
+      GLib.source_remove(id);
+    }
+    this._deferredIds.clear();
+    this._deferredIds = null;
+  }
+
   _toggle_search_light() {
+    this._defer(() => this._do_toggle_search_light());
+  }
+
+  _do_toggle_search_light() {
     if (this._inOverview) return;
     if (!this._visible) {
       this.show();
@@ -1006,10 +1043,10 @@ export default class SearchLightExt extends Extension {
         focus.style_class.includes('popup-menu')
       ) {
         this._lastPopup = focus;
-        this._hidePopups();
+        this._defer(() => this._hidePopups());
       }
 
-      this.hide();
+      this._defer(() => this.hide());
     }
 
     // hide window immediately when activated
@@ -1029,16 +1066,18 @@ export default class SearchLightExt extends Extension {
     let focus = global.stage.get_key_focus();
     if (!focus || !this._entry.contains(focus)) {
       if (evt.get_key_symbol() === Clutter.KEY_Escape) {
-        this.hide();
+        this._defer(() => this.hide());
         return Clutter.EVENT_STOP;
       }
-      this._search._text.get_parent().grab_key_focus();
+      this._defer(() => {
+        this._search?._text?.get_parent()?.grab_key_focus();
+      });
     }
 
     return Clutter.EVENT_STOP;
   }
 
   _onFullScreen() {
-    this.hide();
+    this._defer(() => this.hide());
   }
 }
